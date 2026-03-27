@@ -18,6 +18,7 @@ async def init_db():
                 in_stock INTEGER DEFAULT 0,
                 notified INTEGER DEFAULT 0,
                 last_checked TEXT,
+                source TEXT DEFAULT 'manual',
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -101,3 +102,32 @@ async def get_stats() -> dict:
             "total_alerts": total_alerts,
             "alerts_24h": alerts_24h,
         }
+
+
+async def add_product_if_new(url: str, name: str, retailer: str = "unknown",
+                              product_type: str = "unknown", msrp: float = 0,
+                              source: str = "manual") -> bool:
+    """Add product only if URL doesn't already exist. Returns True if added."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("SELECT id FROM products WHERE url = ?", (url,))
+        if await cursor.fetchone():
+            return False
+        try:
+            await db.execute(
+                """INSERT INTO products (url, name, retailer, product_type, msrp, source)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (url, name, retailer, product_type, msrp, source)
+            )
+            await db.commit()
+            return True
+        except Exception:
+            return False
+
+
+async def get_discovery_count() -> int:
+    """Get count of auto-discovered products."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM products WHERE source = 'auto_discovery'"
+        )
+        return (await cursor.fetchone())[0]

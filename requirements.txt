@@ -1,10 +1,11 @@
-fastapi==0.104.1
-uvicorn==0.24.0
-python-telegram-bot==20.7
 aiohttp==3.9.1
 aiosqlite==0.19.0
 apscheduler==3.10.4
-fake-useragent==1.4.0
 beautifulsoup4==4.12.2
+beautifulsoup4==4.12.3
+fake-useragent==1.4.0
+fastapi==0.104.1
 lxml==4.9.4
 python-dotenv==1.0.0
+python-telegram-bot==20.7
+uvicorn==0.24.0

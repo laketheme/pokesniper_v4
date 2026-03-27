@@ -119,7 +119,7 @@ async def check_shopify_product(session: aiohttp.ClientSession, url: str) -> dic
 
 
 async def check_html_product(session: aiohttp.ClientSession, url: str) -> dict:
-    """Check stock via HTML scraping with pattern matching."""
+    """Check stock via HTML scraping with scoring-based pattern matching."""
     try:
         async with session.get(url, headers=get_headers(), timeout=aiohttp.ClientTimeout(total=15)) as resp:
             if resp.status != 200:
@@ -129,20 +129,7 @@ async def check_html_product(session: aiohttp.ClientSession, url: str) -> dict:
         logger.error(f"HTML fetch failed for {url}: {e}")
         return {"in_stock": None, "price": 0, "method": "fetch_error"}
 
-    # Check for out-of-stock first (takes priority)
-    for pattern in OUT_OF_STOCK_PATTERNS:
-        if pattern.search(html):
-            # Extract price anyway
-            price = extract_price(html)
-            return {"in_stock": False, "price": price, "method": "html_oos_pattern"}
-
-    # Check for in-stock signals
-    for pattern in IN_STOCK_PATTERNS:
-        if pattern.search(html):
-            price = extract_price(html)
-            return {"in_stock": True, "price": price, "method": "html_in_stock_pattern"}
-
-    # Check JSON-LD structured data
+    # 1. Check JSON-LD structured data FIRST (most reliable signal)
     soup = BeautifulSoup(html, "lxml")
     for script in soup.find_all("script", type="application/ld+json"):
         try:
@@ -160,8 +147,59 @@ async def check_html_product(session: aiohttp.ClientSession, url: str) -> dict:
         except (json.JSONDecodeError, ValueError, KeyError):
             continue
 
+    # 2. Use a scoring approach: count both in-stock and OOS signals
+    #    "Add to Cart" is a STRONG in-stock signal that should override
+    #    generic OOS text elsewhere on the page
+    in_stock_score = 0
+    oos_score = 0
+
+    # Strong in-stock signals (buttons, forms) - weighted higher
+    STRONG_IN_STOCK = [
+        re.compile(r'<(button|input|a)[^>]*>\s*add[- _]?to[- _]?cart\s*<', re.IGNORECASE),
+        re.compile(r'<(button|input|a)[^>]*>\s*buy[- _]?now\s*<', re.IGNORECASE),
+        re.compile(r'<(button|input|a)[^>]*>\s*add[- _]?to[- _]?bag\s*<', re.IGNORECASE),
+        re.compile(r'name="add"[^>]*type="submit"', re.IGNORECASE),
+        re.compile(r'id="add-to-cart"', re.IGNORECASE),
+        re.compile(r'class="[^"]*add-to-cart[^"]*"', re.IGNORECASE),
+        re.compile(r'data-action="add-to-cart"', re.IGNORECASE),
+    ]
+
+    # Strong OOS signals (disabled buttons, explicit status)
+    STRONG_OOS = [
+        re.compile(r'<(button|input)[^>]*disabled[^>]*>\s*(sold|out of)', re.IGNORECASE),
+        re.compile(r'"availability"\s*:\s*"https?://schema\.org/OutOfStock"', re.IGNORECASE),
+        re.compile(r'class="[^"]*sold-out[^"]*"', re.IGNORECASE),
+        re.compile(r'class="[^"]*out-of-stock[^"]*"', re.IGNORECASE),
+    ]
+
+    for pattern in STRONG_IN_STOCK:
+        if pattern.search(html):
+            in_stock_score += 3
+
+    for pattern in STRONG_OOS:
+        if pattern.search(html):
+            oos_score += 3
+
+    # Weak signals (text anywhere on page)
+    for pattern in IN_STOCK_PATTERNS:
+        if pattern.search(html):
+            in_stock_score += 1
+
+    for pattern in OUT_OF_STOCK_PATTERNS:
+        if pattern.search(html):
+            oos_score += 1
+
     price = extract_price(html)
-    return {"in_stock": None, "price": price, "method": "unknown"}
+
+    logger.debug(f"Score for {url}: in_stock={in_stock_score}, oos={oos_score}")
+
+    # Decision: in-stock signals win ties (prefer false positive over missed restock)
+    if in_stock_score == 0 and oos_score == 0:
+        return {"in_stock": None, "price": price, "method": "unknown"}
+    elif in_stock_score >= oos_score:
+        return {"in_stock": True, "price": price, "method": f"html_score_in({in_stock_score}v{oos_score})"}
+    else:
+        return {"in_stock": False, "price": price, "method": f"html_score_oos({oos_score}v{in_stock_score})"}
 
 
 def extract_price(html: str) -> float:
